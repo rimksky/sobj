@@ -19,6 +19,7 @@ use std::{
     },
 };
 use tokio::{fs, io::AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use walkdir::WalkDir;
@@ -254,28 +255,38 @@ async fn get_object_impl(state: AppState, headers: HeaderMap, key: String) -> Re
         Err(r) => return r,
     };
 
-    let data = match fs::read(&path).await {
-        Ok(d) => d,
+    // まず metadata（Content-Length 用）
+    let meta = match fs::metadata(&path).await {
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error":"NotFound"})),
-            )
-                .into_response();
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"NotFound"}))).into_response();
         }
         Err(e) => return server_error(e),
     };
 
+    // ファイルを開いてストリーム化
+    let file = match fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return server_error(e),
+    };
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
     let ct = mime_guess::from_path(&key).first_or_octet_stream();
 
-    let mut resp = Response::new(Body::from(data));
+    let mut resp = Response::new(body);
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_str(ct.as_ref()).unwrap(),
     );
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_LENGTH,
+        HeaderValue::from_str(&meta.len().to_string()).unwrap(),
+    );
     resp
 }
+
 
 /* HEAD */
 
