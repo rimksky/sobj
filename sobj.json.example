@@ -1,5 +1,7 @@
 {
-  "endpoint": "http://127.0.0.1:8080",
+  "endpoint": "http://127.0.0.1:9999",
   "token": "Bearer devtoken",
-  "timeout_secs": 300
+  "timeout_secs": 3600,
+  "tls_ca_cert_pem_path": null,
+  "tls_insecure_skip_verify": false
 }

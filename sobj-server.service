@@ -1,0 +1,33 @@
+# sobj-server systemd unit example
+# Place to: /etc/systemd/system/sobj-server.service
+#
+# After that:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sobj-server
+#
+# Logs:
+#   journalctl -u sobj-server -f
+
+[Unit]
+Description=sobj-server (Simple Object Storage)
+After=network.target
+
+[Service]
+Type=simple
+# Adjust these paths to your installation
+WorkingDirectory=/opt/sobj
+ExecStart=/opt/sobj/sobj-server --config /opt/sobj/sobj-server.json
+Restart=on-failure
+RestartSec=2
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/sobj
+# If you keep data elsewhere, add it:
+# ReadWritePaths=/var/lib/sobj
+
+[Install]
+WantedBy=multi-user.target

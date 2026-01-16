@@ -1,1 +1,5 @@
-target/
+/target
+**/*.tmp
+**/*.uploading.tmp
+data
+.DS_Store

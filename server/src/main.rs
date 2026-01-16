@@ -3,7 +3,7 @@ use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use futures_util::StreamExt;
@@ -27,7 +27,7 @@ use walkdir::WalkDir;
 #[derive(Clone)]
 struct AppState {
     storage_dir: Arc<PathBuf>,
-    auth_token: Arc<String>,
+    auth_token: Arc<Option<String>>, // None => auth disabled
     in_flight: Arc<AtomicUsize>,
 }
 
@@ -84,12 +84,19 @@ async fn main() {
         }
     };
 
-    let listen_addr = cfg.listen_addr.unwrap_or_else(|| "0.0.0.0:8080".into());
-    let auth_token = cfg.auth_token.unwrap_or_else(|| "Bearer devtoken".into());
-    let storage_dir = cfg.storage_dir.unwrap_or_else(|| "./data".into());
+    // v0.3 defaults
+    let listen_addr = cfg.listen_addr.unwrap_or_else(|| "0.0.0.0:9999".into());
+    let storage_dir_str = cfg.storage_dir.unwrap_or_else(|| "./data".into());
 
+    // auth_token: omitted or empty => auth disabled
+    let auth_token = cfg.auth_token.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    // storage_dir: relative => base is directory where sobj-server.json exists
     let storage_dir = {
-        let p = PathBuf::from(storage_dir);
+        let p = PathBuf::from(storage_dir_str);
         if p.is_absolute() {
             p
         } else {
@@ -104,7 +111,10 @@ async fn main() {
     };
 
     let app = Router::new()
+        .route("/healthz", get(healthz))
         .route("/", get(list_objects))
+        .route("/_copy", post(copy_object))
+        .route("/_move", post(move_object))
         .route(
             "/*key",
             put(put_object)
@@ -126,12 +136,18 @@ async fn main() {
     .unwrap();
 }
 
+/* ---------------- Auth ---------------- */
+
 fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    let Some(expected) = state.auth_token.as_ref() else {
+        return Ok(()); // auth disabled
+    };
+
     let v = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    if v == Some(state.auth_token.as_str()) {
+    if v == Some(expected.as_str()) {
         Ok(())
     } else {
         let body = Json(serde_json::json!({ "error": "Unauthorized" }));
@@ -148,7 +164,13 @@ fn dec_in_flight(state: &AppState) -> usize {
         .saturating_sub(1)
 }
 
-/* PUT */
+/* ---------------- Health ---------------- */
+
+async fn healthz() -> Response {
+    (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
+}
+
+/* ---------------- PUT ---------------- */
 
 #[derive(Serialize)]
 struct PutResp {
@@ -223,7 +245,7 @@ async fn put_object_impl(state: AppState, headers: HeaderMap, key: String, body:
     (StatusCode::CREATED, Json(PutResp { key, size })).into_response()
 }
 
-/* GET */
+/* ---------------- GET (streaming) ---------------- */
 
 async fn get_object(
     State(state): State<AppState>,
@@ -255,7 +277,6 @@ async fn get_object_impl(state: AppState, headers: HeaderMap, key: String) -> Re
         Err(r) => return r,
     };
 
-    // まず metadata（Content-Length 用）
     let meta = match fs::metadata(&path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -264,11 +285,11 @@ async fn get_object_impl(state: AppState, headers: HeaderMap, key: String) -> Re
         Err(e) => return server_error(e),
     };
 
-    // ファイルを開いてストリーム化
     let file = match fs::File::open(&path).await {
         Ok(f) => f,
         Err(e) => return server_error(e),
     };
+
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
@@ -287,8 +308,7 @@ async fn get_object_impl(state: AppState, headers: HeaderMap, key: String) -> Re
     resp
 }
 
-
-/* HEAD */
+/* ---------------- HEAD ---------------- */
 
 async fn head_object(
     State(state): State<AppState>,
@@ -337,7 +357,7 @@ async fn head_object_impl(state: AppState, headers: HeaderMap, key: String) -> R
     resp
 }
 
-/* DELETE */
+/* ---------------- DELETE ---------------- */
 
 async fn delete_object(
     State(state): State<AppState>,
@@ -373,7 +393,7 @@ async fn delete_object_impl(state: AppState, headers: HeaderMap, key: String) ->
     StatusCode::NO_CONTENT.into_response()
 }
 
-/* LIST */
+/* ---------------- LIST ---------------- */
 
 #[derive(Deserialize)]
 struct ListQuery {
@@ -431,17 +451,7 @@ async fn list_objects_impl(state: AppState, headers: HeaderMap, q: ListQuery) ->
             Err(r) => return r,
         };
 
-    (
-        StatusCode::OK,
-        Json(ListResp {
-            prefix,
-            delimiter,
-            items,
-            common_prefixes,
-            next_cursor,
-        }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(ListResp { prefix, delimiter, items, common_prefixes, next_cursor })).into_response()
 }
 
 async fn list_impl(
@@ -504,32 +514,150 @@ async fn list_impl(
             }
         }
 
-        items.push(ListItem {
-            key,
-            size,
-            last_modified: lm,
-        });
+        items.push(ListItem { key, size, last_modified: lm });
     }
 
     Ok((items, common.into_iter().collect(), None))
 }
 
+/* ---------------- COPY / MOVE ---------------- */
+
+#[derive(Deserialize)]
+struct CopyMoveReq {
+    src: String,
+    dst: String,
+    overwrite: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct CopyMoveResp {
+    src: String,
+    dst: String,
+    size: u64,
+}
+
+async fn copy_object(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<CopyMoveReq>,
+) -> Response {
+    let in_flight = inc_in_flight(&state);
+    tracing::info!(peer=%peer, in_flight=%in_flight, method="COPY", src=%req.src, dst=%req.dst, "request");
+    let resp = copy_object_impl(state.clone(), headers, req).await;
+    let in_flight = dec_in_flight(&state);
+    tracing::info!(peer=%peer, in_flight=%in_flight, status=%resp.status(), "done");
+    resp
+}
+
+async fn copy_object_impl(state: AppState, headers: HeaderMap, req: CopyMoveReq) -> Response {
+    if let Err(r) = require_auth(&headers, &state) {
+        return r;
+    }
+    let overwrite = req.overwrite.unwrap_or(true);
+
+    let src_key = match normalize_key(&req.src) { Ok(k) => k, Err(r) => return r };
+    let dst_key = match normalize_key(&req.dst) { Ok(k) => k, Err(r) => return r };
+
+    let src_path = match key_to_path(&state.storage_dir, &src_key) { Ok(p) => p, Err(r) => return r };
+    let dst_path = match key_to_path(&state.storage_dir, &dst_key) { Ok(p) => p, Err(r) => return r };
+
+    let src_meta = match fs::metadata(&src_path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"NotFound"}))).into_response();
+        }
+        Err(e) => return server_error(e),
+    };
+
+    if !overwrite {
+        if fs::metadata(&dst_path).await.is_ok() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"Conflict","message":"destination exists"}))).into_response();
+        }
+    }
+
+    if let Some(parent) = dst_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent).await {
+            return server_error(e);
+        }
+    }
+
+    match fs::copy(&src_path, &dst_path).await {
+        Ok(_) => (StatusCode::OK, Json(CopyMoveResp{src: src_key, dst: dst_key, size: src_meta.len()})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+async fn move_object(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<CopyMoveReq>,
+) -> Response {
+    let in_flight = inc_in_flight(&state);
+    tracing::info!(peer=%peer, in_flight=%in_flight, method="MOVE", src=%req.src, dst=%req.dst, "request");
+    let resp = move_object_impl(state.clone(), headers, req).await;
+    let in_flight = dec_in_flight(&state);
+    tracing::info!(peer=%peer, in_flight=%in_flight, status=%resp.status(), "done");
+    resp
+}
+
+async fn move_object_impl(state: AppState, headers: HeaderMap, req: CopyMoveReq) -> Response {
+    if let Err(r) = require_auth(&headers, &state) {
+        return r;
+    }
+    let overwrite = req.overwrite.unwrap_or(true);
+
+    let src_key = match normalize_key(&req.src) { Ok(k) => k, Err(r) => return r };
+    let dst_key = match normalize_key(&req.dst) { Ok(k) => k, Err(r) => return r };
+
+    let src_path = match key_to_path(&state.storage_dir, &src_key) { Ok(p) => p, Err(r) => return r };
+    let dst_path = match key_to_path(&state.storage_dir, &dst_key) { Ok(p) => p, Err(r) => return r };
+
+    let src_meta = match fs::metadata(&src_path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"NotFound"}))).into_response();
+        }
+        Err(e) => return server_error(e),
+    };
+
+    if !overwrite {
+        if fs::metadata(&dst_path).await.is_ok() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"Conflict","message":"destination exists"}))).into_response();
+        }
+    } else {
+        let _ = fs::remove_file(&dst_path).await;
+    }
+
+    if let Some(parent) = dst_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent).await {
+            return server_error(e);
+        }
+    }
+
+    match fs::rename(&src_path, &dst_path).await {
+        Ok(_) => (StatusCode::OK, Json(CopyMoveResp{src: src_key, dst: dst_key, size: src_meta.len()})).into_response(),
+        Err(_) => match fs::copy(&src_path, &dst_path).await {
+            Ok(_) => {
+                let _ = fs::remove_file(&src_path).await;
+                (StatusCode::OK, Json(CopyMoveResp{src: src_key, dst: dst_key, size: src_meta.len()})).into_response()
+            }
+            Err(e) => server_error(e),
+        },
+    }
+}
+
+/* ---------------- Key safety ---------------- */
+
 fn normalize_key(raw: &str) -> Result<String, Response> {
     let decoded = percent_decode_str(raw).decode_utf8_lossy().to_string();
 
     if decoded.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"InvalidKey"})),
-        )
-            .into_response());
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"InvalidKey"}))).into_response());
     }
     if decoded.starts_with('/') || decoded.contains("..") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"InvalidKey"})),
-        )
-            .into_response());
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"InvalidKey"}))).into_response());
     }
     Ok(decoded)
 }
@@ -537,11 +665,7 @@ fn normalize_key(raw: &str) -> Result<String, Response> {
 fn key_to_path(root: &StdPath, key: &str) -> Result<PathBuf, Response> {
     let p = root.join(key.replace('\\', "/"));
     if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"InvalidKey"})),
-        )
-            .into_response());
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"InvalidKey"}))).into_response());
     }
     Ok(p)
 }
@@ -551,9 +675,5 @@ fn path_to_key(rel: &StdPath) -> String {
 }
 
 fn server_error<E: std::fmt::Display>(e: E) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error":"InternalError","message":e.to_string()})),
-    )
-        .into_response()
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"InternalError","message":e.to_string()}))).into_response()
 }

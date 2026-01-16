@@ -1,57 +1,95 @@
-# sobj quickstart (macOS) v0.2
+# QUICKSTART (sobj v0.3)
 
-## 1) Build
+このドキュメントは **macOS (ローカル)** で sobj を最短で動かす手順です。
+
+---
+
+## 1. ビルド
+
 ```bash
+git clone <your repo url>
+cd sobj
 cargo build --release
 ```
 
-## 2) Create config files
-（デフォルトは「実行ファイルと同じディレクトリ」を見にいきます）
+生成物:
+- `./target/release/sobj-server`
+- `./target/release/sobj`
 
-### server config
+---
+
+## 2. 設定ファイル作成（実行ファイルの横）
+
+`sobj` は **設定JSONを「実行ファイルと同じディレクトリ」から自動ロード**します。
+
+### server: sobj-server.json
+
 ```bash
 cat > ./target/release/sobj-server.json <<'JSON'
 {
-  "listen_addr": "0.0.0.0:8080",
+  "listen_addr": "0.0.0.0:9999",
   "storage_dir": "./data",
   "auth_token": "Bearer devtoken"
 }
 JSON
 ```
 
-### cli config
+### cli: sobj.json
+
 ```bash
 cat > ./target/release/sobj.json <<'JSON'
 {
-  "endpoint": "http://127.0.0.1:8080",
+  "endpoint": "http://127.0.0.1:9999",
   "token": "Bearer devtoken",
-  "timeout_secs": 300
+  "timeout_secs": 3600
 }
 JSON
 ```
 
-## 3) Run server
+---
+
+## 3. サーバ起動
+
 ```bash
 mkdir -p ./data
 ./target/release/sobj-server
 ```
 
-## 4) Use CLI
+---
+
+## 4. 動作確認（healthz）
+
 ```bash
-echo "hello" > hello.txt
-./target/release/sobj put hello.txt foo/hello.txt
-./target/release/sobj ls --prefix foo/ --delimiter /
-./target/release/sobj get foo/hello.txt out.txt
-./target/release/sobj head foo/hello.txt
-./target/release/sobj rm foo/hello.txt
+curl http://127.0.0.1:9999/healthz
 ```
 
-## Override config path
+---
+
+## 5. CLI 動作確認
+
 ```bash
-./target/release/sobj-server --config ./sobj-server.json
-./target/release/sobj --config ./sobj.json ls
+echo hello > hello.txt
+
+./target/release/sobj put hello.txt test/hello.txt
+./target/release/sobj ls --prefix test/ --delimiter /
+./target/release/sobj get test/hello.txt out.txt
+
+./target/release/sobj cp test/hello.txt test/hello-copy.txt
+./target/release/sobj mv test/hello-copy.txt test/hello-moved.txt
 ```
 
-## External access (no nginx)
-- `listen_addr` を `0.0.0.0:8080` にすると外部から到達可能
-- macOS のファイアウォールで許可が必要な場合があります
+---
+
+## 6. TLS を使う場合（任意）
+
+### 6.1 自前 CA を追加する（推奨）
+
+```bash
+./target/release/sobj --ca-cert /path/to/ca.pem ls
+```
+
+### 6.2 TLS 検証を無効化する（非推奨）
+
+```bash
+./target/release/sobj --insecure ls
+```
