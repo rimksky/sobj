@@ -38,6 +38,15 @@ struct ServerConfig {
     auth_token: Option<String>,
 }
 
+#[derive(Serialize)]
+struct HealthzResponse {
+    app: &'static str,
+    version: &'static str,
+    status: &'static str,
+    in_flight: usize,
+}
+
+
 fn default_config_path(file_name: &str) -> Result<PathBuf, Response> {
     let exe = std::env::current_exe().map_err(server_error)?;
     let dir = exe.parent().ok_or_else(|| server_error("failed to get exe dir"))?;
@@ -128,12 +137,10 @@ async fn main() {
     let addr: SocketAddr = listen_addr.parse().expect("invalid listen_addr");
     tracing::info!("sobj-server listening on http://{}", addr);
 
-    axum::serve(
-        tokio::net::TcpListener::bind(addr).await.unwrap(),
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    axum_server::bind(addr)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .unwrap();
 }
 
 /* ---------------- Auth ---------------- */
@@ -166,9 +173,15 @@ fn dec_in_flight(state: &AppState) -> usize {
 
 /* ---------------- Health ---------------- */
 
-async fn healthz() -> Response {
-    (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
+async fn healthz(State(state): State<AppState>) -> Json<HealthzResponse> {
+    Json(HealthzResponse {
+        app: env!("CARGO_PKG_NAME"),
+        version: env!("CARGO_PKG_VERSION"),
+        status: "ok",
+        in_flight: state.in_flight.load(Ordering::Relaxed),
+    })
 }
+
 
 /* ---------------- PUT ---------------- */
 
