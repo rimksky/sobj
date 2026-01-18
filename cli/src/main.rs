@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::Certificate;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
@@ -90,11 +90,22 @@ fn default_config_path() -> Result<PathBuf> {
     Ok(dir.join("sobj.json"))
 }
 
-fn load_config(path: Option<PathBuf>) -> Result<CliConfig> {
+fn load_config(path: Option<PathBuf>) -> Result<(CliConfig, PathBuf)> {
     let path = path.unwrap_or(default_config_path()?);
     let txt = std::fs::read_to_string(&path).with_context(|| format!("read config {:?}", path))?;
     let cfg: CliConfig = serde_json::from_str(&txt).context("parse json")?;
-    Ok(cfg)
+    Ok((cfg, path))
+}
+
+fn resolve_from_cfg_dir(cfg_path: &Path, p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        cfg_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(p)
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,7 +141,7 @@ struct CopyMoveResp {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = load_config(cli.config.clone())?;
+    let (cfg, cfg_path) = load_config(cli.config.clone())?;
 
     let endpoint = cfg
         .endpoint
@@ -148,7 +159,15 @@ async fn main() -> Result<()> {
         builder = builder.danger_accept_invalid_certs(true);
     }
 
-    let ca_path = cli.ca_cert.clone().or_else(|| cfg.tls_ca_cert_pem_path.clone().map(PathBuf::from));
+    // CA cert path:
+    // - CLI (--ca-cert) keeps current behavior
+    // - Config (tls_ca_cert_pem_path) resolves relative paths from sobj.json directory
+    let ca_path = cli.ca_cert.clone().or_else(|| {
+        cfg.tls_ca_cert_pem_path
+            .clone()
+            .map(|s| resolve_from_cfg_dir(&cfg_path, PathBuf::from(s)))
+    });
+
     if let Some(p) = ca_path {
         let pem = std::fs::read(&p).with_context(|| format!("read ca cert {:?}", p))?;
         let cert = Certificate::from_pem(&pem).context("invalid PEM cert")?;

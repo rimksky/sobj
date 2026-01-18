@@ -1,7 +1,12 @@
 {
-  "endpoint": "http://127.0.0.1:9999",
+  "endpoint": "https://localhost:9999",
   "token": "Bearer devtoken",
   "timeout_secs": 3600,
-  "tls_ca_cert_pem_path": null,
+
+  // CA certificate (CA:TRUE) for server certificate verification
+  // Relative paths are resolved from sobj.json location
+  "tls_ca_cert_pem_path": "./tls/ca.cert.pem",
+
+  // For testing only (NOT recommended for production)
   "tls_insecure_skip_verify": false
 }

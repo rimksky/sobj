@@ -1,5 +1,14 @@
 {
   "listen_addr": "0.0.0.0:9999",
   "storage_dir": "./data",
-  "auth_token": "Bearer devtoken"
+  "auth_token": "Bearer devtoken",
+
+  // TLS is disabled by default.
+  // Enable explicitly by setting tls_enabled=true or using --tls option.
+  "tls_enabled": true,
+  "tls": {
+    // Paths are resolved relative to sobj-server.json location
+    "cert_pem": "./tls/server.cert.pem",
+    "key_pem": "./tls/server.key.pem"
+  }
 }

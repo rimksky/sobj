@@ -22,6 +22,7 @@ use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
+use axum_server::tls_rustls::RustlsConfig;
 use walkdir::WalkDir;
 
 #[derive(Clone)]
@@ -36,6 +37,15 @@ struct ServerConfig {
     listen_addr: Option<String>,
     storage_dir: Option<String>,
     auth_token: Option<String>,
+    // v0.3.2
+    tls_enabled: Option<bool>, // optional, default = false
+    tls: Option<TlsConfig>,
+}
+
+#[derive(Deserialize)]
+struct TlsConfig {
+    cert_pem: String,
+    key_pem: String,
 }
 
 #[derive(Serialize)]
@@ -81,9 +91,28 @@ fn load_config() -> Result<(ServerConfig, PathBuf), Response> {
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
+
     tracing_subscriber::fmt()
         .with_env_filter("info,tower_http=info")
         .init();
+
+    // ---- CLI TLS flags (v0.3.2) ----
+    let mut cli_tls = false;
+    let mut cli_no_tls = false;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--tls" => cli_tls = true,
+            "--no-tls" => cli_no_tls = true,
+            _ => {}
+        }
+    }
+    if cli_tls && cli_no_tls {
+        eprintln!("args error: both --tls and --no-tls are set");
+        std::process::exit(2);
+    }
 
     let (cfg, cfg_path) = match load_config() {
         Ok(v) => v,
@@ -135,12 +164,62 @@ async fn main() {
         .with_state(state);
 
     let addr: SocketAddr = listen_addr.parse().expect("invalid listen_addr");
+
+/*
     tracing::info!("sobj-server listening on http://{}", addr);
 
     axum_server::bind(addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();
+*/
+
+    // ---- TLS enablement (CLI > JSON > default=false) ----
+    let tls_enabled = if cli_tls {
+        true
+    } else if cli_no_tls {
+        false
+    } else {
+        cfg.tls_enabled.unwrap_or(false)
+    };
+
+    if tls_enabled {
+        let tls = cfg.tls.as_ref().unwrap_or_else(|| {
+            eprintln!("config error: tls is enabled but tls section is missing");
+            std::process::exit(2);
+        });
+
+        // resolve relative paths from directory where sobj-server.json exists
+        let base = cfg_path.parent().unwrap_or_else(|| StdPath::new("."));
+        let cert = {
+            let p = PathBuf::from(&tls.cert_pem);
+            if p.is_absolute() { p } else { base.join(p) }
+        };
+        let key = {
+            let p = PathBuf::from(&tls.key_pem);
+            if p.is_absolute() { p } else { base.join(p) }
+        };
+
+        tracing::info!("sobj-server listening on https://{}", addr);
+
+        let tls = RustlsConfig::from_pem_file(cert, key)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("tls config error: {:?}", e);
+                std::process::exit(2);
+            });
+
+        axum_server::bind_rustls(addr, tls)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    } else {
+        tracing::info!("sobj-server listening on http://{}", addr);
+        axum_server::bind(addr)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    }
 }
 
 /* ---------------- Auth ---------------- */

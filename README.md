@@ -1,17 +1,19 @@
-# sobj — Simple Object Storage (v0.3)
+# sobj — Simple Object Storage (v0.4)
 
-`sobj` は **S3風のAPIを持つ、超シンプルなオブジェクトストレージ**です。  
-Rust（axum）で実装されたサーバと、Rust製CLIクライアントで構成されます。
+`sobj` は、ローカルファイルシステムをバックエンドとする  
+**軽量なオブジェクトストレージサーバ + CLI クライアント**です。
 
-v0.3 の追加:
-- ✅ MIT License（git 公開用ファイル追加）
-- ✅ Copy / Move（サーバAPI + CLIコマンド）
-- ✅ (cli) ルートTLS証明書（CA）指定 / 証明書検証無効化オプション
-- ✅ (cli) endpoint デフォルト `http://127.0.0.1:9999`
-- ✅ (server) listen_addr デフォルト `0.0.0.0:9999`
-- ✅ (server) storage_dir 相対パスの基準は `sobj-server.json` のあるディレクトリ
-- ✅ (server) auth_token 省略可（空/未設定なら認証なし）
-- ✅ (server) 動作確認用 `GET /healthz`
+- シンプルな HTTP/HTTPS API
+- nginx などのリバースプロキシ配下でも利用可能
+- ローカル開発〜小規模用途向け
+
+---
+
+## ドキュメント
+
+- [QUICKSTART](QUICKSTART.md) — 最短で動かす手順（HTTPS 含む）
+- [API](API.md) — HTTP/HTTPS API 仕様
+- [CHANGELOG](CHANGELOG.md) — バージョンごとの変更点
 
 ---
 
@@ -21,15 +23,30 @@ v0.3 の追加:
 cargo build --release
 ```
 
-生成物:
-- `./target/release/sobj-server`
-- `./target/release/sobj`
+生成物：
+
+- `target/release/sobj-server`
+- `target/release/sobj`
 
 ---
 
-## 設定ファイル（JSON）
+## 設定ファイル
 
-### server: `sobj-server.json`（デフォルト: 実行ファイルの横）
+### server: `sobj-server.json`
+
+> ⚠️ 相対パス（`storage_dir`, `tls.cert_pem`, `tls.key_pem`）は  
+> **`sobj-server.json` が置かれているディレクトリ基準**で解決されます。
+
+### 最小構成（HTTP）
+
+```json
+{
+  "listen_addr": "0.0.0.0:9999",
+  "storage_dir": "./data"
+}
+```
+
+### 認証付き（HTTP）
 
 ```json
 {
@@ -39,114 +56,93 @@ cargo build --release
 }
 ```
 
-- `auth_token` を省略または空文字 `""` にすると **認証なし**（Authorization不要）
-
-### cli: `sobj.json`（デフォルト: 実行ファイルの横）
+### HTTPS 有効化例
 
 ```json
 {
-  "endpoint": "http://127.0.0.1:9999",
+  "listen_addr": "0.0.0.0:9999",
+  "storage_dir": "./data",
+  "auth_token": "Bearer devtoken",
+
+  "tls_enabled": true,
+  "tls": {
+    "cert_pem": "./tls/server.cert.pem",
+    "key_pem": "./tls/server.key.pem"
+  }
+}
+```
+
+---
+
+### cli: `sobj.json`
+
+> ⚠️ 相対パス（`tls_ca_cert_pem_path`）は  
+> **`sobj.json` が置かれているディレクトリ基準**で解決されます。
+
+```json
+{
+  "endpoint": "https://localhost:9999",
   "token": "Bearer devtoken",
   "timeout_secs": 3600,
 
-  "tls_ca_cert_pem_path": null,
+  "tls_ca_cert_pem_path": "./tls/ca.cert.pem",
   "tls_insecure_skip_verify": false
 }
 ```
 
 ---
 
-## 起動
+## 起動方法
+
+### HTTP
 
 ```bash
 mkdir -p ./data
 ./target/release/sobj-server
 ```
 
----
-
-## CLI 例
+### HTTPS
 
 ```bash
-echo "hello" > hello.txt
-
-./target/release/sobj put hello.txt foo/hello.txt
-./target/release/sobj get foo/hello.txt out.txt
-./target/release/sobj ls --prefix foo/ --delimiter /
-
-# Copy / Move
-./target/release/sobj cp foo/hello.txt foo/hello-copy.txt
-./target/release/sobj mv foo/hello-copy.txt foo/moved.txt
-
-# Health check
-curl http://127.0.0.1:9999/healthz
+./target/release/sobj-server --tls
 ```
 
 ---
 
-## TLS（https endpoint を使う場合）
+## API（概要）
 
-CLI で上書き可能:
+### ヘルスチェック
 
-```bash
-./target/release/sobj --ca-cert /path/to/ca.pem ls
-./target/release/sobj --insecure get foo/bar.bin out.bin
+```http
+GET /healthz
 ```
 
-JSON でも指定可能（CLIオプションが優先）:
-- `tls_ca_cert_pem_path`
-- `tls_insecure_skip_verify`
+- 認証不要
+- サーバの生存確認用
+- 詳細は [API.md](API.md) を参照
+
+---
+
+## 運用例
+
+### nginx 配下で利用する場合
+
+```json
+{
+  "listen_addr": "127.0.0.1:9999",
+  "storage_dir": "/var/lib/sobj"
+}
+```
+
+nginx 側で HTTPS 終端：
+
+```nginx
+proxy_pass http://127.0.0.1:9999;
+```
 
 ---
 
 ## License
 
-MIT. See `LICENSE`.
+MIT
 
-
----
-
-## ドキュメント
-
-- **API仕様書**: `API.md`
-- **最短起動手順**: `QUICKSTART.md`
-- **Nginx リバースプロキシ例（HTTP）**: `nginx-sobj.conf`
-- **Nginx リバースプロキシ例（TLS/443 終端）**: `nginx-sobj-tls.conf`
-- **systemd unit 例**: `sobj-server.service`
-
----
-
-## 簡易仕様（要点）
-
-### 認証
-- `Authorization: <token>` ヘッダで認証する
-- サーバ設定 `auth_token` が **未設定/空文字** の場合は **認証なし**
-
-### キー（key）
-- `foo/bar.txt` のように `/` を含めてよい（仮想フォルダ）
-- 先頭 `/` は不可
-- `..` を含むキーは不可
-
-### エンドポイント
-- **PUT `/{key}`**: アップロード（上書き）
-- **GET `/{key}`**: ダウンロード（ストリーミング）
-- **HEAD `/{key}`**: メタ情報取得
-- **DELETE `/{key}`**: 削除（冪等）
-- **GET `/`**: 一覧（prefix / delimiter / limit / cursor）
-- **POST `/_copy`**: Copy（src → dst）
-- **POST `/_move`**: Move（src → dst）
-- **GET `/healthz`**: 動作確認（認証不要）
-
-### 設定ファイル
-- サーバ: `sobj-server.json`（実行ファイルと同じディレクトリがデフォルト）
-- CLI: `sobj.json`（実行ファイルと同じディレクトリがデフォルト）
-
-v0.3 デフォルト:
-- CLI endpoint: `http://127.0.0.1:9999`
-- Server listen_addr: `0.0.0.0:9999`
-
-
-
-### Copy / Move の overwrite
-- サーバAPIの `overwrite` は省略時 **true**（上書き）
-- CLI はデフォルトで上書き。`--no-overwrite` を付けると上書きしない

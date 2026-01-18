@@ -1,99 +1,208 @@
-# sobj API Specification (v0.3)
+# API.md — sobj v0.4
 
-## 概要
-
-`sobj` は **S3 風だが極限まで簡略化したオブジェクトストレージ API** です。
-
-- bucket 概念なし
-- Host 名に依存しない
-- 認証は共通トークン（ただし v0.3 で省略可）
-- フォルダはキーのプレフィックスとして扱う
-- HTTP/JSON ベース
-- PUT / GET はストリーミング対応（大容量ファイル可）
+このドキュメントは **sobj-server v0.4 の HTTP/HTTPS API 仕様**をまとめたものです。  
+ストレージの永続化はローカルファイルシステムを前提とします。
 
 ---
 
 ## 共通仕様
 
 ### Base URL
+```
+http://{host}:{port}
+https://{host}:{port}
+```
+
+### 認証
+- `auth_token` が設定されている場合、以下の HTTP ヘッダが必須
 
 ```
-http(s)://<host>:<port>/
+Authorization: Bearer <token>
 ```
 
-### 認証（任意）
-
-`auth_token` が **未設定 / 空文字** の場合、認証は無効で `Authorization` は不要。
-
-認証が有効な場合は、すべての API で `Authorization` ヘッダ必須。
-
-```
-Authorization: <auth_token>
-```
+未指定または不正な場合は `401 Unauthorized`。
 
 ---
 
-## オブジェクトキー（key）
+## ヘルスチェック
 
-- UTF-8
-- `/` を含めてよい（仮想フォルダ）
-- **先頭 `/` は不可**
-- `..` を含むものは不可
-- URL パスでは URL エンコードされた状態で送信する
+### GET /healthz
 
----
+サーバの生存確認用エンドポイント。  
+**認証不要**。
 
-## API 一覧
+#### レスポンス例
+```json
+{
+  "app": "sobj-server",
+  "version": "0.4.0",
+  "status": "ok",
+  "in_flight": 0
+}
+```
 
-| 操作 | Method | Path |
+#### フィールド
+| フィールド | 型 | 説明 |
 |---|---|---|
-| オブジェクト作成 / 上書き | PUT | /{key} |
-| オブジェクト取得 | GET | /{key} |
-| オブジェクト削除 | DELETE | /{key} |
-| オブジェクト情報取得 | HEAD | /{key} |
-| オブジェクト一覧 | GET | / |
-| Copy | POST | /_copy |
-| Move | POST | /_move |
-| Health check | GET | /healthz |
+| app | string | アプリケーション名 |
+| version | string | サーババージョン |
+| status | string | `"ok"` 固定 |
+| in_flight | number | 処理中リクエスト数 |
 
 ---
 
-## Copy / Move
+## オブジェクト一覧
+
+### GET /
+
+保存されているオブジェクトの一覧を返す。
+
+#### レスポンス例
+```json
+{
+  "objects": [
+    {
+      "key": "foo.txt",
+      "size": 123,
+      "mtime": "2026-01-01T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## オブジェクト取得
+
+### GET /{key}
+
+指定したキーのオブジェクトを取得する。
+
+- 存在しない場合は `404 Not Found`
+
+#### レスポンス
+- Body: オブジェクトのバイナリデータ
+- `Content-Type` は拡張子から推測
+
+---
+
+## オブジェクトメタデータ取得
+
+### HEAD /{key}
+
+オブジェクト本体を返さず、メタデータのみ取得する。
+
+#### レスポンスヘッダ
+```
+Content-Length: <size>
+Last-Modified: <RFC3339>
+```
+
+---
+
+## オブジェクト保存
+
+### PUT /{key}
+
+指定したキーでオブジェクトを保存する。
+
+- 既存キーがある場合は **上書き**
+
+#### リクエスト
+- Body: 任意のバイナリ
+
+#### レスポンス
+```
+201 Created
+```
+
+---
+
+## オブジェクト削除
+
+### DELETE /{key}
+
+指定したキーのオブジェクトを削除する。
+
+- 存在しない場合は `404 Not Found`
+
+#### レスポンス
+```
+204 No Content
+```
+
+---
+
+## オブジェクトコピー
 
 ### POST /_copy
 
-Request:
+既存オブジェクトを別キーにコピーする。
 
+#### リクエスト
 ```json
-{ "src": "foo/a.bin", "dst": "bar/a.bin", "overwrite": true }
+{
+  "from": "src.txt",
+  "to": "dst.txt"
+}
 ```
 
-Response:
-
+#### レスポンス例
 ```json
-{ "src": "foo/a.bin", "dst": "bar/a.bin", "size": 12345 }
-```
-
-### POST /_move
-
-Request:
-
-```json
-{ "src": "foo/a.bin", "dst": "bar/a.bin", "overwrite": true }
-```
-
-Response:
-
-```json
-{ "src": "foo/a.bin", "dst": "bar/a.bin", "size": 12345 }
+{
+  "ok": true
+}
 ```
 
 ---
 
-## GET /healthz
+## オブジェクト移動
 
-認証不要。
+### POST /_move
 
+既存オブジェクトを別キーに移動（rename）する。
+
+#### リクエスト
 ```json
-{ "status": "ok" }
+{
+  "from": "src.txt",
+  "to": "dst.txt"
+}
 ```
+
+#### レスポンス例
+```json
+{
+  "ok": true
+}
+```
+
+---
+
+## ステータスコード一覧
+
+| ステータス | 説明 |
+|---|---|
+| 200 | OK |
+| 201 | Created |
+| 204 | No Content |
+| 400 | Bad Request |
+| 401 | Unauthorized |
+| 404 | Not Found |
+| 500 | Internal Server Error |
+
+---
+
+## 注意事項
+
+- パスは URL デコード後にファイルパスとして扱われる
+- ディレクトリ区切り（`/`）を含むキーも使用可能
+- TLS / HTTPS の詳細は `README.md` / `QUICKSTART.md` を参照
+
+---
+
+## 互換性
+
+- v0.4.x 系では API 互換性を維持
+- 破壊的変更は v0.5 で実施予定
+
