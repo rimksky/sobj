@@ -32,7 +32,7 @@ struct AppState {
     in_flight: Arc<AtomicUsize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ServerConfig {
     listen_addr: Option<String>,
     storage_dir: Option<String>,
@@ -63,14 +63,16 @@ fn default_config_path(file_name: &str) -> Result<PathBuf, Response> {
     Ok(dir.join(file_name))
 }
 
-fn load_config() -> Result<(ServerConfig, PathBuf), Response> {
+fn load_config_optional() -> Result<(Option<ServerConfig>, PathBuf), Response> {
     let mut args = std::env::args().skip(1);
     let mut config_path: Option<PathBuf> = None;
+    let mut config_explicit = false;
 
     while let Some(a) = args.next() {
         if a == "--config" {
             if let Some(p) = args.next() {
                 config_path = Some(PathBuf::from(p));
+                config_explicit = true;
             }
         }
     }
@@ -80,13 +82,25 @@ fn load_config() -> Result<(ServerConfig, PathBuf), Response> {
         None => default_config_path("sobj-server.json")?,
     };
 
+    // If --config is explicitly specified, missing file is an error.
+    // Otherwise (default path alongside sobj-server binary), missing file is allowed
+    // and we fall back to built-in defaults. In that case, relative paths are
+    // resolved from the sobj-server binary directory via this pseudo config path.
+    if !path.exists() {
+        if config_explicit {
+            let msg = format!("failed to read config: file not found (path: {:?})", path);
+            return Err(server_error(msg));
+        }
+        return Ok((None, path));
+    }
+
     let txt = std::fs::read_to_string(&path).map_err(|e| {
         let msg = format!("failed to read config: {} (expected at: {:?})", e, path);
         server_error(msg)
     })?;
     let cfg: ServerConfig =
         serde_json::from_str(&txt).map_err(|e| server_error(format!("invalid json: {}", e)))?;
-    Ok((cfg, path))
+    Ok((Some(cfg), path))
 }
 
 #[tokio::main]
@@ -114,7 +128,7 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let (cfg, cfg_path) = match load_config() {
+    let (cfg_opt, cfg_path) = match load_config_optional() {
         Ok(v) => v,
         Err(r) => {
             eprintln!("config error: {:?}", r);
@@ -122,7 +136,10 @@ async fn main() {
         }
     };
 
-    // v0.3 defaults
+    // Built-in defaults (config file is optional)
+    let cfg = cfg_opt.unwrap_or_default();
+
+    // v0.4 defaults
     let listen_addr = cfg.listen_addr.unwrap_or_else(|| "0.0.0.0:9999".into());
     let storage_dir_str = cfg.storage_dir.unwrap_or_else(|| "./data".into());
 
@@ -132,7 +149,9 @@ async fn main() {
         if t.is_empty() { None } else { Some(t) }
     });
 
-    // storage_dir: relative => base is directory where sobj-server.json exists
+    // storage_dir: relative => base is directory where sobj-server.json exists.
+    // When config file is missing, cfg_path points to the default config path
+    // alongside the sobj-server binary, so relative paths resolve from exe dir.
     let storage_dir = {
         let p = PathBuf::from(storage_dir_str);
         if p.is_absolute() {
