@@ -165,15 +165,6 @@ async fn main() {
 
     let addr: SocketAddr = listen_addr.parse().expect("invalid listen_addr");
 
-/*
-    tracing::info!("sobj-server listening on http://{}", addr);
-
-    axum_server::bind(addr)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
-*/
-
     // ---- TLS enablement (CLI > JSON > default=false) ----
     let tls_enabled = if cli_tls {
         true
