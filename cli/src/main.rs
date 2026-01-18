@@ -75,7 +75,7 @@ enum Commands {
     Health,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Default)]
 struct CliConfig {
     endpoint: Option<String>,
     token: Option<String>,
@@ -90,11 +90,31 @@ fn default_config_path() -> Result<PathBuf> {
     Ok(dir.join("sobj.json"))
 }
 
-fn load_config(path: Option<PathBuf>) -> Result<(CliConfig, PathBuf)> {
-    let path = path.unwrap_or(default_config_path()?);
+fn load_config_optional(path: Option<PathBuf>) -> Result<(Option<CliConfig>, PathBuf)> {
+    let mut config_explicit = false;
+
+    let path = match path {
+        Some(p) => {
+            config_explicit = true;
+            p
+        }
+        None => default_config_path()?,
+    };
+
+    // If --config is explicitly specified, missing file is an error.
+    // Otherwise, missing config is allowed and built-in defaults are used.
+    // In that case, we still return a pseudo config path alongside the sobj binary
+    // so relative paths can be resolved consistently.
+    if !path.exists() {
+        if config_explicit {
+            return Err(anyhow!("config file not found: {:?}", path));
+        }
+        return Ok((None, path));
+    }
+
     let txt = std::fs::read_to_string(&path).with_context(|| format!("read config {:?}", path))?;
     let cfg: CliConfig = serde_json::from_str(&txt).context("parse json")?;
-    Ok((cfg, path))
+    Ok((Some(cfg), path))
 }
 
 fn resolve_from_cfg_dir(cfg_path: &Path, p: PathBuf) -> PathBuf {
@@ -141,7 +161,10 @@ struct CopyMoveResp {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let (cfg, cfg_path) = load_config(cli.config.clone())?;
+    let (cfg_opt, cfg_path) = load_config_optional(cli.config.clone())?;
+
+    // Built-in defaults (config file is optional)
+    let cfg = cfg_opt.unwrap_or_default();
 
     let endpoint = cfg
         .endpoint
