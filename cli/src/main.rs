@@ -229,10 +229,11 @@ fn maybe_auth(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuil
 
 fn progress_bar(total: u64, label: &str) -> ProgressBar {
     let pb = ProgressBar::new(total);
-    pb.set_style(
-        ProgressStyle::with_template("{msg:9} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap(),
-    );
+    #[cfg(target_os = "linux")]
+    let template = "{msg:9} [{bar:30}] {bytes}/{total_bytes} ({bytes_per_sec})";
+    #[cfg(not(target_os = "linux"))]
+    let template = "{msg:9} [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})";
+    pb.set_style(ProgressStyle::with_template(template).unwrap());
     pb.set_message(label.to_string());
     pb
 }
