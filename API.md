@@ -1,6 +1,6 @@
-# API.md — sobj v0.4
+# API.md — sobj v0.5
 
-**sobj-server v0.4 の HTTP/HTTPS API 仕様**。
+**sobj-server v0.5 の HTTP/HTTPS API 仕様**。
 ストレージの永続化はローカルファイルシステムを前提とします。
 
 ---
@@ -62,7 +62,7 @@ Authorization: <token>
 ```json
 {
   "app": "sobj-server",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "status": "ok",
   "in_flight": 3
 }
@@ -211,6 +211,30 @@ GET /?limit=100&cursor=images/photo.jpg
 | 401 | Unauthorized（認証失敗） |
 | 404 | Not Found |
 | 500 | Internal Server Error |
+
+---
+
+## ストレージとデータフォルダ
+
+オブジェクトのキーはそのままファイルシステムのパスにマップされます。
+
+```
+キー:  images/2024/photo.jpg
+パス:  {storage_dir}/images/2024/photo.jpg
+```
+
+`storage_dir` は `sobj-server.json` の `storage_dir` フィールドで指定します（デフォルト: `./data`）。
+相対パスは `sobj-server.json` が置かれているディレクトリ基準で解決されます。
+
+```json
+{
+  "storage_dir": "./data"
+}
+```
+
+- PUT 時に中間ディレクトリが存在しない場合は自動的に作成されます
+- DELETE でオブジェクトを削除しても空になったディレクトリは残ります
+- `storage_dir` は起動前に存在している必要はありません（最初の PUT 時に自動作成）
 
 ---
 
