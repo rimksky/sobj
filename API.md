@@ -1,6 +1,6 @@
 # API.md — sobj v0.4
 
-このドキュメントは **sobj-server v0.4 の HTTP/HTTPS API 仕様**をまとめたものです。  
+**sobj-server v0.4 の HTTP/HTTPS API 仕様**。
 ストレージの永続化はローカルファイルシステムを前提とします。
 
 ---
@@ -14,40 +14,66 @@ https://{host}:{port}
 ```
 
 ### 認証
-- `auth_token` が設定されている場合、以下の HTTP ヘッダが必須
+
+設定ファイルで `auth_token` を指定している場合、全エンドポイント（`/health` を除く）で以下のヘッダが必須。
 
 ```
-Authorization: Bearer <token>
+Authorization: <token>
 ```
 
-未指定または不正な場合は `401 Unauthorized`。
+`token` は設定ファイルの `auth_token` の値をそのまま使用する。
+ヘッダが未指定または値が一致しない場合は `401 Unauthorized`。
+
+### エラーレスポンス形式
+
+エラー時は常に以下の JSON を返す。`message` は省略される場合がある。
+
+```json
+{
+  "error": "ErrorCode",
+  "message": "詳細メッセージ"
+}
+```
+
+| `error` の値 | ステータス | 説明 |
+|---|---|---|
+| `Unauthorized` | 401 | 認証ヘッダが未指定または不一致 |
+| `InvalidKey` | 400 | キーが空、`/` で始まる、または `..` を含む |
+| `NotFound` | 404 | 指定したキーが存在しない |
+| `InternalError` | 500 | サーバ内部エラー |
+
+### キーの制約
+
+- 空文字は不可
+- `/` で始まるキーは不可
+- `..` を含むキーは不可（パストラバーサル防止）
+- `/` をパス区切りとして使用可能（例: `images/2024/photo.jpg`）
 
 ---
 
 ## ヘルスチェック
 
-### GET /healthz
+### GET /health
 
-サーバの生存確認用エンドポイント。  
-**認証不要**。
+サーバの生存確認用エンドポイント。**認証不要**。
 
-#### レスポンス例
+#### レスポンス `200 OK`
+
 ```json
 {
   "app": "sobj-server",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "status": "ok",
-  "in_flight": 0
+  "in_flight": 3
 }
 ```
 
-#### フィールド
 | フィールド | 型 | 説明 |
 |---|---|---|
-| app | string | アプリケーション名 |
-| version | string | サーババージョン |
-| status | string | `"ok"` 固定 |
-| in_flight | number | 処理中リクエスト数 |
+| `app` | string | アプリケーション名（固定値 `"sobj-server"`） |
+| `version` | string | サーババージョン |
+| `status` | string | 固定値 `"ok"` |
+| `in_flight` | number | 現在処理中のリクエスト数 |
 
 ---
 
@@ -57,45 +83,45 @@ Authorization: Bearer <token>
 
 保存されているオブジェクトの一覧を返す。
 
-#### レスポンス例
+#### クエリパラメータ
+
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `prefix` | string | `""` | このプレフィックスで始まるキーのみ返す |
+| `limit` | number | `1000` | 返すアイテムの最大件数（上限 `10000`） |
+| `cursor` | string | `""` | ページネーション用カーソル。前回レスポンスの `next_cursor` を指定する |
+
+#### レスポンス `200 OK`
+
 ```json
 {
-  "objects": [
+  "prefix": "images/",
+  "items": [
     {
-      "key": "foo.txt",
-      "size": 123,
-      "mtime": "2026-01-01T12:00:00Z"
+      "key": "images/photo.jpg",
+      "size": 204800,
+      "last_modified": "2026-03-01T12:00:00Z"
     }
-  ]
+  ],
+  "next_cursor": "images/photo.jpg"
 }
 ```
 
----
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `prefix` | string | リクエスト時の `prefix`（未指定時は `""`） |
+| `items` | array | マッチしたオブジェクトの配列（キー昇順） |
+| `items[].key` | string | オブジェクトのキー |
+| `items[].size` | number | バイト数 |
+| `items[].last_modified` | string \| null | 最終更新日時（RFC 3339）。取得できない場合は `null` |
+| `next_cursor` | string \| null | 次ページが存在する場合に返すカーソル値。`null` の場合は最終ページ |
 
-## オブジェクト取得
+#### ページネーション
 
-### GET /{key}
+`next_cursor` が `null` でない場合、次のリクエストで `cursor=<next_cursor>` を指定すると続きを取得できる。
 
-指定したキーのオブジェクトを取得する。
-
-- 存在しない場合は `404 Not Found`
-
-#### レスポンス
-- Body: オブジェクトのバイナリデータ
-- `Content-Type` は拡張子から推測
-
----
-
-## オブジェクトメタデータ取得
-
-### HEAD /{key}
-
-オブジェクト本体を返さず、メタデータのみ取得する。
-
-#### レスポンスヘッダ
 ```
-Content-Length: <size>
-Last-Modified: <RFC3339>
+GET /?limit=100&cursor=images/photo.jpg
 ```
 
 ---
@@ -104,17 +130,60 @@ Last-Modified: <RFC3339>
 
 ### PUT /{key}
 
-指定したキーでオブジェクトを保存する。
-
-- 既存キーがある場合は **上書き**
+指定したキーでオブジェクトを保存する。既存キーがある場合は**上書き**。
 
 #### リクエスト
-- Body: 任意のバイナリ
 
-#### レスポンス
+- ボディ: 任意のバイナリ
+- `Content-Type`: 任意（レスポンスには影響しない）
+
+#### レスポンス `201 Created`
+
+```json
+{
+  "key": "images/photo.jpg",
+  "size": 204800
+}
 ```
-201 Created
-```
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `key` | string | 保存されたオブジェクトのキー |
+| `size` | number | 保存されたバイト数 |
+
+---
+
+## オブジェクト取得
+
+### GET /{key}
+
+指定したキーのオブジェクトをストリーミングで返す。
+
+#### レスポンス `200 OK`
+
+- ボディ: オブジェクトのバイナリデータ
+- `Content-Type`: キーの拡張子から推測（不明な場合は `application/octet-stream`）
+- `Content-Length`: バイト数
+
+存在しない場合は `404 NotFound`。
+
+---
+
+## オブジェクトメタデータ取得
+
+### HEAD /{key}
+
+オブジェクト本体を返さず、サイズのみ確認する。
+
+#### レスポンス `200 OK`
+
+ボディなし。以下のレスポンスヘッダを返す。
+
+| ヘッダ | 説明 |
+|---|---|
+| `Content-Length` | オブジェクトのバイト数 |
+
+存在しない場合は `404 NotFound`。
 
 ---
 
@@ -123,59 +192,11 @@ Last-Modified: <RFC3339>
 ### DELETE /{key}
 
 指定したキーのオブジェクトを削除する。
+キーが存在しない場合でも `204 No Content` を返す（冪等）。
 
-- 存在しない場合は `404 Not Found`
+#### レスポンス `204 No Content`
 
-#### レスポンス
-```
-204 No Content
-```
-
----
-
-## オブジェクトコピー
-
-### POST /_copy
-
-既存オブジェクトを別キーにコピーする。
-
-#### リクエスト
-```json
-{
-  "from": "src.txt",
-  "to": "dst.txt"
-}
-```
-
-#### レスポンス例
-```json
-{
-  "ok": true
-}
-```
-
----
-
-## オブジェクト移動
-
-### POST /_move
-
-既存オブジェクトを別キーに移動（rename）する。
-
-#### リクエスト
-```json
-{
-  "from": "src.txt",
-  "to": "dst.txt"
-}
-```
-
-#### レスポンス例
-```json
-{
-  "ok": true
-}
-```
+ボディなし。
 
 ---
 
@@ -184,10 +205,10 @@ Last-Modified: <RFC3339>
 | ステータス | 説明 |
 |---|---|
 | 200 | OK |
-| 201 | Created |
-| 204 | No Content |
-| 400 | Bad Request |
-| 401 | Unauthorized |
+| 201 | Created（PUT 成功） |
+| 204 | No Content（DELETE 成功） |
+| 400 | Bad Request（不正なキー） |
+| 401 | Unauthorized（認証失敗） |
 | 404 | Not Found |
 | 500 | Internal Server Error |
 
@@ -195,14 +216,5 @@ Last-Modified: <RFC3339>
 
 ## 注意事項
 
-- パスは URL デコード後にファイルパスとして扱われる
-- ディレクトリ区切り（`/`）を含むキーも使用可能
-- TLS / HTTPS の詳細は `README.md` / `QUICKSTART.md` を参照
-
----
-
-## 互換性
-
-- v0.4.x 系では API 互換性を維持
-- 破壊的変更は v0.5 で実施予定
-
+- アップロード中の一時ファイル（`*.uploading.tmp`）は一覧に表示されない
+- TLS / HTTPS の設定については `QUICKSTART.md` を参照

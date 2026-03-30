@@ -4,7 +4,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::Certificate;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{path::{Path, PathBuf}, time::Duration};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -15,6 +15,10 @@ struct Cli {
     /// Config path (default: sobj.json next to this executable)
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// 接続先エンドポイント URL (設定ファイルより優先)
+    #[arg(long)]
+    endpoint: Option<String>,
 
     /// Root CA certificate PEM file (overrides config)
     #[arg(long)]
@@ -44,8 +48,6 @@ enum Commands {
         #[arg(long)]
         prefix: Option<String>,
         #[arg(long)]
-        delimiter: Option<String>,
-        #[arg(long)]
         limit: Option<usize>,
         #[arg(long)]
         cursor: Option<String>,
@@ -54,22 +56,6 @@ enum Commands {
     },
     Head { key: String },
     Rm { key: String },
-
-    /// Copy object: src -> dst
-    Cp {
-        src: String,
-        dst: String,
-        #[arg(long)]
-        no_overwrite: bool,
-    },
-
-    /// Move object: src -> dst
-    Mv {
-        src: String,
-        dst: String,
-        #[arg(long)]
-        no_overwrite: bool,
-    },
 
     /// Health check
     Health,
@@ -132,10 +118,7 @@ fn resolve_from_cfg_dir(cfg_path: &Path, p: PathBuf) -> PathBuf {
 struct ListResp {
     #[allow(dead_code)]
     prefix: String,
-    #[allow(dead_code)]
-    delimiter: Option<String>,
     items: Vec<ListItem>,
-    common_prefixes: Vec<String>,
     next_cursor: Option<String>,
 }
 #[derive(Deserialize)]
@@ -145,29 +128,22 @@ struct ListItem {
     last_modified: Option<String>,
 }
 
-#[derive(Serialize)]
-struct CopyMoveReq {
-    src: String,
-    dst: String,
-    overwrite: bool,
-}
-#[derive(Deserialize)]
-struct CopyMoveResp {
-    src: String,
-    dst: String,
-    size: u64,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
+
     let cli = Cli::parse();
     let (cfg_opt, cfg_path) = load_config_optional(cli.config.clone())?;
 
     // Built-in defaults (config file is optional)
     let cfg = cfg_opt.unwrap_or_default();
 
-    let endpoint = cfg
+    let endpoint = cli
         .endpoint
+        .clone()
+        .or(cfg.endpoint)
         .unwrap_or_else(|| "http://127.0.0.1:9999".to_string())
         .trim_end_matches('/')
         .to_string();
@@ -206,17 +182,11 @@ async fn main() -> Result<()> {
         Commands::Get { key, local } => {
             get_cmd(&client, &endpoint, &token, key, local).await?;
         }
-        Commands::Ls { prefix, delimiter, limit, cursor, json } => {
-            ls_cmd(&client, &endpoint, &token, prefix, delimiter, limit, cursor, json).await?;
+        Commands::Ls { prefix, limit, cursor, json } => {
+            ls_cmd(&client, &endpoint, &token, prefix, limit, cursor, json).await?;
         }
         Commands::Head { key } => head_cmd(&client, &endpoint, &token, key).await?,
         Commands::Rm { key } => rm_cmd(&client, &endpoint, &token, key).await?,
-        Commands::Cp { src, dst, no_overwrite } => {
-            copy_move_cmd(&client, &endpoint, &token, true, src, dst, !no_overwrite).await?;
-        }
-        Commands::Mv { src, dst, no_overwrite } => {
-            copy_move_cmd(&client, &endpoint, &token, false, src, dst, !no_overwrite).await?;
-        }
         Commands::Health => health_cmd(&client, &endpoint).await?,
     }
 
@@ -225,6 +195,17 @@ async fn main() -> Result<()> {
 
 fn maybe_auth(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
     if token.trim().is_empty() { req } else { req.header(AUTHORIZATION, token) }
+}
+
+/// レスポンスのステータスを確認し、エラーなら Err を返す。
+/// 成功時はボディテキストを返す。
+async fn check_response(res: reqwest::Response, op: &str) -> Result<String> {
+    let status = res.status();
+    let txt = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("{} failed: {} {}", op, status, txt));
+    }
+    Ok(txt)
 }
 
 fn progress_bar(total: u64, label: &str) -> ProgressBar {
@@ -288,14 +269,8 @@ async fn put_cmd(
         .await
         .context("request failed")?;
 
-    let status = res.status();
-    let txt = res.text().await.unwrap_or_default();
     pb.finish_and_clear();
-
-    if !status.is_success() {
-        return Err(anyhow!("PUT failed: {} {}", status, txt));
-    }
-
+    let txt = check_response(res, "PUT").await?;
     println!("{}", txt);
     Ok(())
 }
@@ -347,7 +322,6 @@ async fn ls_cmd(
     endpoint: &str,
     token: &str,
     prefix: Option<String>,
-    delimiter: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
     json_out: bool,
@@ -355,7 +329,6 @@ async fn ls_cmd(
     let mut url = format!("{}/", endpoint);
     let mut qp: Vec<(String, String)> = vec![];
     if let Some(p) = prefix { qp.push(("prefix".into(), p)); }
-    if let Some(d) = delimiter { qp.push(("delimiter".into(), d)); }
     if let Some(l) = limit { qp.push(("limit".into(), l.to_string())); }
     if let Some(c) = cursor { qp.push(("cursor".into(), c)); }
 
@@ -374,11 +347,7 @@ async fn ls_cmd(
         .await
         .context("request failed")?;
 
-    let status = res.status();
-    let txt = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("LS failed: {} {}", status, txt));
-    }
+    let txt = check_response(res, "LS").await?;
 
     if json_out {
         println!("{}", txt);
@@ -386,14 +355,6 @@ async fn ls_cmd(
     }
 
     let parsed: ListResp = serde_json::from_str(&txt).context("parse json")?;
-
-    if !parsed.common_prefixes.is_empty() {
-        println!("CommonPrefixes:");
-        for p in &parsed.common_prefixes {
-            println!("  {}", p);
-        }
-        println!();
-    }
 
     if !parsed.items.is_empty() {
         println!("Items:");
@@ -436,11 +397,7 @@ async fn head_cmd(client: &reqwest::Client, endpoint: &str, token: &str, key: St
 async fn rm_cmd(client: &reqwest::Client, endpoint: &str, token: &str, key: String) -> Result<()> {
     let url = format!("{}/{}", endpoint, encode_key(&key));
     let res = maybe_auth(client.delete(url), token).send().await?;
-    let status = res.status();
-    let txt = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("RM failed: {} {}", status, txt));
-    }
+    let txt = check_response(res, "RM").await?;
     if !txt.trim().is_empty() {
         println!("{}", txt);
     } else {
@@ -449,44 +406,11 @@ async fn rm_cmd(client: &reqwest::Client, endpoint: &str, token: &str, key: Stri
     Ok(())
 }
 
-async fn copy_move_cmd(
-    client: &reqwest::Client,
-    endpoint: &str,
-    token: &str,
-    is_copy: bool,
-    src: String,
-    dst: String,
-    overwrite: bool,
-) -> Result<()> {
-    let url = if is_copy { format!("{}/_copy", endpoint) } else { format!("{}/_move", endpoint) };
-
-    let req = CopyMoveReq { src, dst, overwrite };
-
-    let res = maybe_auth(client.post(url), token)
-        .json(&req)
-        .send()
-        .await
-        .context("request failed")?;
-
-    let status = res.status();
-    let txt = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("{} failed: {} {}", if is_copy { "CP" } else { "MV" }, status, txt));
-    }
-
-    let parsed: CopyMoveResp = serde_json::from_str(&txt).context("parse json")?;
-    println!("{} -> {} ({} bytes)", parsed.src, parsed.dst, parsed.size);
-    Ok(())
-}
 
 async fn health_cmd(client: &reqwest::Client, endpoint: &str) -> Result<()> {
-    let url = format!("{}/healthz", endpoint);
+    let url = format!("{}/health", endpoint);
     let res = client.get(url).send().await.context("request failed")?;
-    let status = res.status();
-    let txt = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("HEALTH failed: {} {}", status, txt));
-    }
+    let txt = check_response(res, "HEALTH").await?;
     println!("{}", txt);
     Ok(())
 }

@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-gnu
+            label: windows-x64
+            server_bin: sobj-server.exe
+            cli_bin: sobj.exe
+          - target: x86_64-unknown-linux-musl
+            label: linux-x64
+            server_bin: sobj-server
+            cli_bin: sobj
+          - target: aarch64-unknown-linux-musl
+            label: linux-aarch64
+            server_bin: sobj-server
+            cli_bin: sobj
+          - target: armv7-unknown-linux-musleabihf
+            label: linux-armv7
+            server_bin: sobj-server
+            cli_bin: sobj
+          - target: arm-unknown-linux-musleabihf
+            label: linux-arm
+            server_bin: sobj-server
+            cli_bin: sobj
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          SERVER_ARCHIVE=sobj-server-${TAG}-${{ matrix.label }}.tar.gz
+          CLI_ARCHIVE=sobj-${TAG}-${{ matrix.label }}.tar.gz
+
+          # Windows は .exe、それ以外はそのまま
+          cp target/${{ matrix.target }}/release/${{ matrix.server_bin }} ${{ matrix.server_bin }}
+          cp target/${{ matrix.target }}/release/${{ matrix.cli_bin }} ${{ matrix.cli_bin }}
+
+          tar czf ${SERVER_ARCHIVE} ${{ matrix.server_bin }}
+          tar czf ${CLI_ARCHIVE} ${{ matrix.cli_bin }}
+
+          echo "SERVER_ARCHIVE=${SERVER_ARCHIVE}" >> $GITHUB_ENV
+          echo "CLI_ARCHIVE=${CLI_ARCHIVE}" >> $GITHUB_ENV
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.label }}
+          path: |
+            ${{ env.SERVER_ARCHIVE }}
+            ${{ env.CLI_ARCHIVE }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## ${{ github.ref_name }}
+
+            ### ダウンロード
+
+            | ファイル | 対象 |
+            |---|---|
+            | `sobj-server-*-windows-x64.tar.gz` | Windows x64 サーバ |
+            | `sobj-*-windows-x64.tar.gz` | Windows x64 CLI |
+            | `sobj-server-*-linux-x64.tar.gz` | Linux x64 サーバ（静的リンク） |
+            | `sobj-*-linux-x64.tar.gz` | Linux x64 CLI |
+            | `sobj-server-*-linux-aarch64.tar.gz` | Raspberry Pi 4/5, Zero 2W（64bit） サーバ |
+            | `sobj-*-linux-aarch64.tar.gz` | Raspberry Pi 4/5, Zero 2W（64bit） CLI |
+            | `sobj-server-*-linux-armv7.tar.gz` | Raspberry Pi 3/2（32bit OS） サーバ |
+            | `sobj-*-linux-armv7.tar.gz` | Raspberry Pi 3/2（32bit OS） CLI |
+            | `sobj-server-*-linux-arm.tar.gz` | Raspberry Pi Zero/Zero W サーバ |
+            | `sobj-*-linux-arm.tar.gz` | Raspberry Pi Zero/Zero W CLI |
+
+            詳細は [CHANGELOG](CHANGELOG.md) を参照してください。
+          files: artifacts/*
+          draft: false
+          prerelease: false

@@ -1,7 +1,6 @@
-# QUICKSTART — sobj v0.4
+# QUICKSTART — sobj v0.5
 
-このドキュメントは **sobj v0.4 を最短で動かす手順**です。  
-HTTPS（TLS）込みで、**5〜10分で疎通確認**できることを目標にしています。
+このドキュメントは **sobj v0.4 を最短で動かす手順**です。
 
 ---
 
@@ -15,7 +14,35 @@ HTTPS（TLS）込みで、**5〜10分で疎通確認**できることを目標�
 
 ---
 
-## 1. ディレクトリ構成（例）
+## HTTP で手早く試す（TLS なし）
+
+設定ファイルなしでそのまま起動できます。
+
+```bash
+mkdir -p ./data
+./target/release/sobj-server
+# → http://0.0.0.0:9999 でリスン
+```
+
+```bash
+# ヘルスチェック
+curl http://localhost:9999/health
+
+# CLI でアップロード・確認（--endpoint で接続先を直接指定）
+./target/release/sobj --endpoint http://localhost:9999 put ./README.md README.md
+./target/release/sobj --endpoint http://localhost:9999 ls
+./target/release/sobj --endpoint http://localhost:9999 get README.md /tmp/out.md
+```
+
+---
+
+## HTTPS で動かす（TLS あり）
+
+HTTPS で動かす場合は **5〜10 分で疎通確認**できます。
+
+---
+
+### 1. ディレクトリ構成（例）
 
 ```text
 sobj/
@@ -34,43 +61,53 @@ sobj/
 
 ---
 
-## 2. ローカル CA を作る（1回だけ）
+### 2. ローカル CA を作る（1回だけ）
 
 ```bash
 mkdir -p tls
 cd tls
 ```
 
-### CA 秘密鍵
+#### CA 秘密鍵
 ```bash
 openssl genrsa -out ca.key.pem 2048
 ```
 
-### CA 証明書（CA:TRUE）
+#### CA 証明書（CA:TRUE）
 ```bash
-openssl req -x509 -new -nodes   -key ca.key.pem   -sha256   -days 3650   -subj "/CN=sobj-dev-ca"   -addext "basicConstraints=critical,CA:TRUE"   -addext "keyUsage=critical,keyCertSign,cRLSign"   -out ca.cert.pem
+openssl req -x509 -new -nodes \
+  -key ca.key.pem \
+  -sha256 \
+  -days 3650 \
+  -subj "/CN=sobj-dev-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -out ca.cert.pem
 ```
 
 確認：
 ```bash
-openssl x509 -in ca.cert.pem -noout -text | grep -n "Basic Constraints" -A2
+openssl x509 -in ca.cert.pem -noout -text | grep -A2 "Basic Constraints"
 ```
 
 ---
 
-## 3. サーバ証明書を作る（SAN 付き）
+### 3. サーバ証明書を作る（SAN 付き）
 
-### サーバ秘密鍵
+#### サーバ秘密鍵
 ```bash
 openssl genrsa -out server.key.pem 2048
 ```
 
-### CSR 作成
+#### CSR 作成
 ```bash
-openssl req -new   -key server.key.pem   -subj "/CN=localhost"   -out server.csr.pem
+openssl req -new \
+  -key server.key.pem \
+  -subj "/CN=localhost" \
+  -out server.csr.pem
 ```
 
-### 拡張定義（SAN）
+#### 拡張定義（SAN）
 ```bash
 cat > server.ext <<'EOF'
 basicConstraints=critical,CA:FALSE
@@ -80,19 +117,27 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
 EOF
 ```
 
-### CA で署名
+#### CA で署名
 ```bash
-openssl x509 -req   -in server.csr.pem   -CA ca.cert.pem   -CAkey ca.key.pem   -CAcreateserial   -out server.cert.pem   -days 365   -sha256   -extfile server.ext
+openssl x509 -req \
+  -in server.csr.pem \
+  -CA ca.cert.pem \
+  -CAkey ca.key.pem \
+  -CAcreateserial \
+  -out server.cert.pem \
+  -days 365 \
+  -sha256 \
+  -extfile server.ext
 ```
 
 確認：
 ```bash
-openssl x509 -in server.cert.pem -noout -text | grep -n "Subject Alternative Name" -A2
+openssl x509 -in server.cert.pem -noout -text | grep -A2 "Subject Alternative Name"
 ```
 
 ---
 
-## 4. sobj-server の設定
+### 4. sobj-server の設定
 
 `sobj-server.json`
 
@@ -113,7 +158,7 @@ openssl x509 -in server.cert.pem -noout -text | grep -n "Subject Alternative Nam
 
 ---
 
-## 5. sobj-server を起動
+### 5. sobj-server を起動
 
 ```bash
 mkdir -p data
@@ -127,7 +172,7 @@ sobj-server listening on https://0.0.0.0:9999
 
 ---
 
-## 6. CLI の設定
+### 6. CLI の設定
 
 `sobj.json`
 
@@ -145,23 +190,26 @@ sobj-server listening on https://0.0.0.0:9999
 
 ---
 
-## 7. 動作確認
+### 7. 動作確認
 
-### curl
+#### curl
 ```bash
-curl --cacert ./tls/ca.cert.pem https://localhost:9999/healthz
+curl --cacert ./tls/ca.cert.pem https://localhost:9999/health
 ```
 
-### CLI
+#### CLI
 ```bash
+./target/release/sobj health
 ./target/release/sobj ls
+./target/release/sobj put ./README.md README.md
+./target/release/sobj ls
+./target/release/sobj get README.md /tmp/out.md
+./target/release/sobj rm README.md
 ```
-
-成功すれば空の一覧が返ります。
 
 ---
 
-## 8. よくあるエラー
+## よくあるエラー
 
 ### ❌ certificate was not trusted
 - CA ではなく server.cert.pem を指定している
@@ -169,12 +217,11 @@ curl --cacert ./tls/ca.cert.pem https://localhost:9999/healthz
 
 ### ❌ SAN エラー
 - 証明書に `DNS:localhost` が無い
-- `https://127.0.0.1` でアクセスしている
+- `https://127.0.0.1` でアクセスしている（DNS:localhost のみ設定の場合）
 
 ---
 
 ## 次に読む
 
-- `README.md` — 全体仕様
-- `API.md` — API 詳細
-
+- `README.md` — 全体概要・設定リファレンス
+- `API.md` — API 詳細仕様

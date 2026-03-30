@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## v0.5.0
+
+> ⚠️ **v0.4 系との互換性なし**
+>
+> 以下の破壊的変更により、v0.4 系のサーバ・CLI とは混在利用できません。
+> サーバとCLI は同じバージョンを使用してください。
+>
+> - エンドポイント `/healthz` → `/health` に変更
+> - LIST レスポンスの `common_prefixes` フィールド削除
+> - LIST クエリパラメータ `delimiter` 削除
+> - コピー / リネーム API（`PUT /{dst}?copy_src={src}` / `POST /rename`）削除
+
+### Added
+- CLI に `--endpoint <URL>` オプションを追加（設定ファイルの `endpoint` より優先）
+- GitHub Actions によるリリースワークフロー追加（タグプッシュで全ターゲットのバイナリを自動ビルド・リリース）
+
+### Changed
+- ヘルスチェックエンドポイントを `/healthz` → `/health` に変更
+- サーバコードをモジュール分割（`state` / `error` / `auth` / `key` / `handlers`）
+- エラーレスポンスを `ErrorBody` で統一（`{"error":"...", "message":"..."}`）
+- PUT の並行書き込み安全性向上：`AtomicU64` によるユニーク tmp ファイル名採用
+- CLI のレスポンスチェックを `check_response` ヘルパーに集約
+- Windows バックスラッシュのパス変換処理を削除
+- LIST の `delimiter` / `common_prefixes` パラメータを削除（ファイルシステムに実フォルダがあるため不要）
+- API.md を実装に合わせて全面改訂
+
+### Removed
+- オブジェクトのコピー / リネーム機能（`PUT /{dst}?copy_src={src}` / `POST /rename`）
+- CLI の `cp` / `mv` サブコマンド
+
+---
+
 ## v0.4.0
 
 ### Added
@@ -28,4 +60,3 @@
 ## v0.3.1
 - axum-server migration groundwork
 - `/healthz` endpoint introduced
-
